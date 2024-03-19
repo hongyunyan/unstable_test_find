@@ -212,7 +212,7 @@ func getQueryURL(testType *string) (string, bool) {
 	} else if *testType == "storage-test" {
 		return "https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/pull_cdc_integration_storage_test/", true
 	} else {
-		fmt.Println("[ERROR]please enter the correct test type. Including ut, kafka-test, mysql-test, pulsar-test, storage-test ")
+		fmt.Println("[ERROR]please enter the correct test type. Including ut, kafka-test, mysql-test, pulsar-test, storage-test")
 	}
 	return "", false
 }
