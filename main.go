@@ -1,5 +1,6 @@
 /*
-本工具用于找到对应 commit 区间中的每一个 PR 在 ci 上跑出 unstable ut 的 构建链接
+本工具用于找到对应 commit 区间中的每一个 PR 在 ci 上跑出 unstable test 的 构建链接
+这边我们只查找最后一次 commit 后失败的构建链接（先搞个宽松简单的判断条件）
 Input:
 
 	start_commit, commit 区间开始的 commit（含本commit）
@@ -14,11 +15,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/google/go-github/v32/github"
@@ -26,16 +27,15 @@ import (
 )
 
 const (
-	owner     = "pingcap"
-	repo      = "tiflow"
-	verfiyUrl = "https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/ghpr_verify/api/json"
+	owner = "pingcap"
+	repo  = "tiflow"
 )
 
-func getGithubClient() *github.Client {
+func getGithubClient(githubToken *string) *github.Client {
 	// github token
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: "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"},
+		&oauth2.Token{AccessToken: *githubToken},
 	)
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
@@ -44,7 +44,7 @@ func getGithubClient() *github.Client {
 }
 
 // 根据 commit 找到对应的 PR
-func getCommitRelatedPR(client *github.Client, owner string, repo string, commit string) (pr *github.PullRequest, succ bool) {
+func getCommitRelatedPR(client *github.Client, owner string, repo string, commit *string) (pr *github.PullRequest, succ bool) {
 	opt := &github.PullRequestListOptions{
 		ListOptions: github.ListOptions{PerPage: 30},
 		State:       "closed",
@@ -61,7 +61,7 @@ func getCommitRelatedPR(client *github.Client, owner string, repo string, commit
 		}
 
 		for _, pr := range PRs {
-			if *pr.MergeCommitSHA == commit {
+			if *pr.MergeCommitSHA == *commit {
 				return pr, true
 			}
 		}
@@ -138,8 +138,8 @@ func getPRLastCommit(client *github.Client, owner string, repo string, prNumber 
 	return &commit
 }
 
-func getFailedCIURLWithCommits(commitsMap *map[string]bool) (ciLists []string) {
-	verifyJenkinsResponse, err := http.Get(verfiyUrl)
+func getFailedCIURLWithCommits(commitsMap *map[string]bool, jenkinsQueryURL string) (ciLists []string) {
+	verifyJenkinsResponse, err := http.Get(jenkinsQueryURL + "api/json")
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -160,7 +160,7 @@ func getFailedCIURLWithCommits(commitsMap *map[string]bool) (ciLists []string) {
 	for _, build := range jenkinsResponse.Builds {
 		count += 1
 
-		buildJobUrl := fmt.Sprintf("https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/ghpr_verify/%d/api/json", build.Number)
+		buildJobUrl := fmt.Sprintf(jenkinsQueryURL+"%d/api/json", build.Number)
 		buildJobResp, err := http.Get(buildJobUrl)
 		if err != nil {
 			fmt.Println(err)
@@ -192,7 +192,7 @@ func getFailedCIURLWithCommits(commitsMap *map[string]bool) (ciLists []string) {
 
 		// 判断 jobCommit 是否在 commits 中
 		if _, ok := (*commitsMap)[jobCommit]; ok {
-			ciLists = append(ciLists, fmt.Sprintf("https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/ghpr_verify/%d", build.Number))
+			ciLists = append(ciLists, fmt.Sprintf(jenkinsQueryURL+"%d", build.Number))
 		}
 	}
 
@@ -200,11 +200,38 @@ func getFailedCIURLWithCommits(commitsMap *map[string]bool) (ciLists []string) {
 
 }
 
+func getQueryURL(testType *string) (string, bool) {
+	if *testType == "ut" {
+		return "https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/ghpr_verify/", true
+	} else if *testType == "kafka-test" {
+		return "https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/pull_cdc_integration_kafka_test/", true
+	} else if *testType == "mysql-test" {
+		return "https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/pull_cdc_integration_test/", true
+	} else if *testType == "pulsar-test" {
+		return "https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/pull_cdc_integration_pulsar_test/", true
+	} else if *testType == "storage-test" {
+		return "https://do.pingcap.net/jenkins/job/pingcap/job/tiflow/job/pull_cdc_integration_storage_test/", true
+	} else {
+		fmt.Println("[ERROR]please enter the correct test type. Including ut, kafka-test, mysql-test, pulsar-test, storage-test ")
+	}
+	return "", false
+}
+
 func main() {
+
+	testType := flag.String("test_type", "ut", "please enter the test type you want to check. Including ut, kafka-test, mysql-test, pulsar-test, storage-test .default is ut,")
+	startCommit := flag.String("start_commit", "", "please enter the commit you want to start with")
+	endCommit := flag.String("end_commit", "", "please enter the commit you want to end with")
+	githubToken := flag.String("github_token", "", "please enter your github token")
+	flag.Parse()
+
+	jenkinsQueryURL, ok := getQueryURL(testType)
+	if !ok {
+		return
+	}
+
 	// step 1: 获取两个 commit 对应的 PR，以及对应的 merge 时间（因为排序方式没有按照 merged 时间排序，所以需要手动比较每个 PR）
-	githubClient := getGithubClient()
-	startCommit := os.Args[1]
-	endCommit := os.Args[2]
+	githubClient := getGithubClient(githubToken)
 
 	startPR, succ := getCommitRelatedPR(githubClient, owner, repo, startCommit)
 	if !succ {
@@ -241,7 +268,7 @@ func main() {
 	}
 
 	// step 4: 获取每个 commit 对应的 ci 构建 verify 链接中失败的链接
-	ciLists := getFailedCIURLWithCommits(&shaMap)
+	ciLists := getFailedCIURLWithCommits(&shaMap, jenkinsQueryURL)
 
 	fmt.Println("======Below is the unstable ut ci link======")
 	for _, ciLink := range ciLists {
